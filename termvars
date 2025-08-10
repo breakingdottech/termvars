@@ -1,0 +1,179 @@
+#!/bin/bash
+
+# File paths for environment variable storage
+USER_ENVFILE="$HOME/.termvars_env"         # User-level env vars file
+ROOT_ENVFILE="/etc/terminator_env_vars"   # Root-level env vars file
+
+# Function to display usage instructions and exit
+usage() {
+    echo "Usage: termvars [-a|-n|-i] [--sync] set VAR VALUE"
+    echo "       termvars [-a|-n|-i] [--sync] unset VAR"
+    echo "       termvars [-a|-n|-i] [--sync] list"
+    echo "       termvars [-a|-n|-i] [--sync] reload"
+    echo ""
+    echo "Flags:"
+    echo "  -a     all panes (default)"
+    echo "  -n     new panes only"
+    echo "  -i     current pane only"
+    echo "  --sync sync vars between user and root files"
+    exit 1
+}
+
+# Default scope is 'all panes'
+scope="a"
+sync_flag=0
+
+# Parse command-line options and flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -a) scope="a"; shift ;;    # Apply to all panes
+        -n) scope="n"; shift ;;    # Apply to new panes only
+        -i) scope="i"; shift ;;    # Apply to current pane only
+        --sync) sync_flag=1; shift ;; # Synchronize user and root env files
+        set|unset|list|reload)     # Main commands
+            cmd=$1; shift
+            break
+            ;;
+        *) usage ;;                # Show usage on unknown option
+    esac
+done
+
+# Ensure a command is provided
+if [[ -z "$cmd" ]]; then
+    usage
+fi
+
+# Determine which environment file to use based on whether running as root
+if [ "$EUID" -eq 0 ]; then
+    ENVFILE="$ROOT_ENVFILE"
+else
+    ENVFILE="$USER_ENVFILE"
+fi
+
+# Function to reload environment variables from the env file into current shell
+reload_vars() {
+    if [[ -f "$ENVFILE" ]]; then
+        source "$ENVFILE"
+    fi
+}
+
+# Function to safely write new content to the env file
+write_envfile() {
+    local tmpfile="${ENVFILE}.tmp"
+    printf "%s\n" "${1}" > "$tmpfile"
+    mv "$tmpfile" "$ENVFILE"
+}
+
+# Synchronize environment variables from root env file to user env file
+sync_vars() {
+    if [[ -f "$ROOT_ENVFILE" ]]; then
+        echo "[*] Syncing vars from root file to user file..."
+        cp "$ROOT_ENVFILE" "$USER_ENVFILE"
+    else
+        echo "[!] No root env file to sync from"
+    fi
+}
+
+# Handle sync flag: perform sync and exit
+if [[ $sync_flag -eq 1 ]]; then
+    sync_vars
+    echo "[*] Sync completed."
+    exit 0
+fi
+
+# Main command processing
+case $cmd in
+    set)
+        varname=$1
+        shift
+        value="$*"
+
+        # Validate input
+        [[ -z "$varname" || -z "$value" ]] && usage
+
+        case $scope in
+            i)
+                # Set variable only in current shell session
+                export "$varname=$value"
+                echo "[i] Set $varname=$value only in this pane"
+                ;;
+            n|a)
+                # Update environment file for new/all panes
+                
+                # Remove any existing entry for this variable
+                if [[ -f "$ENVFILE" ]]; then
+                    grep -v "^export $varname=" "$ENVFILE" > "${ENVFILE}.tmp" 2>/dev/null || true
+                else
+                    # Create empty temp file if none exists
+                    touch "${ENVFILE}.tmp"
+                fi
+
+                # Append new export line
+                echo "export $varname=\"$value\"" >> "${ENVFILE}.tmp"
+
+                # Move temp file to replace original environment file
+                mv "${ENVFILE}.tmp" "$ENVFILE"
+
+                if [[ $scope == "a" ]]; then
+                    # Reload environment variables in current pane
+                    reload_vars
+                    echo "[a] Set $varname=$value for all panes."
+                    echo "Note: other panes need to run 'termvars reload' or be restarted."
+                else
+                    echo "[n] Set $varname=$value for new panes only."
+                fi
+                ;;
+        esac
+        ;;
+    unset)
+        varname=$1
+        [[ -z "$varname" ]] && usage
+
+        case $scope in
+            i)
+                # Unset variable only in current shell session
+                unset "$varname"
+                echo "[i] Unset $varname only in this pane"
+                ;;
+            n|a)
+                # Remove export line from environment file
+                if [[ -f "$ENVFILE" ]]; then
+                    grep -v "^export $varname=" "$ENVFILE" > "${ENVFILE}.tmp" 2>/dev/null || true
+                    mv "${ENVFILE}.tmp" "$ENVFILE"
+                    echo "[$scope] Unset $varname in env file"
+                    if [[ $scope == "a" ]]; then
+                        reload_vars
+                        echo "Note: other panes need to run 'termvars reload' or be restarted."
+                    fi
+                else
+                    echo "[!] Env file does not exist"
+                fi
+                ;;
+        esac
+        ;;
+    list)
+        case $scope in
+            i)
+                # List environment variables in current shell session
+                env
+                ;;
+            n|a)
+                # List variables stored in env file
+                if [[ -f "$ENVFILE" ]]; then
+                    cat "$ENVFILE"
+                else
+                    echo "(no vars set in $ENVFILE)"
+                fi
+                ;;
+        esac
+        ;;
+    reload)
+        # Reload environment variables from env file into current shell
+        reload_vars
+        echo "[*] Reloaded environment variables from $ENVFILE"
+        ;;
+    *)
+        # Unknown command: show usage
+        usage
+        ;;
+esac
